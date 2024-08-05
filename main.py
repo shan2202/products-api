@@ -1,5 +1,6 @@
+import os
 from typing import Annotated, Union
-from fastapi import Depends, FastAPI, Header, HTTPException, status, Form
+from fastapi import Depends, FastAPI, Header, HTTPException, status, Form, Response
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, ValidationError
 from passlib.context import CryptContext
@@ -10,11 +11,13 @@ from sqlalchemy import Boolean, Column, Integer, String, create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from fastapi.encoders import jsonable_encoder
+import os
 
 # to get a string like this run:
 # openssl rand -hex 32
 # get from env
 SECRET_KEY = "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7"
+# SECRET_KEY = os.environ.get('JWT_SECRET')
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
@@ -46,24 +49,7 @@ class Users(Base):
 
 Base.metadata.create_all(bind=engine)
 
-fake_users_db = {
-    "johndoe": {
-        "username": "johndoe",
-        "full_name": "John Doe",
-        "email": "johndoe@example.com",
-        "hashed_password": "$2b$12$EixZaYVK1fsbw1ZfbX3OXePaWxn96p36WQoeG6Lruj3vjPGga31lW",
-        "disabled": False,
-        "admin": True
-    },
-    "alice": {
-        "username": "alice",
-        "full_name": "Alice Wonderson",
-        "email": "alice@example.com",
-        "hashed_password": "$2b$12$EixZaYVK1fsbw1ZfbX3OXePaWxn96p36WQoeG6Lruj3vjPGga31lW",
-        "disabled": False,
-        "admin": False
-    },
-}
+fake_users_db = {}
 
 
 class Token(BaseModel):
@@ -103,18 +89,15 @@ def get_password_hash(password):
 
 
 def get_user(db, username: str):
-    db_1 = SessionLocal()
-    user = db_1.query(Users).filter(Users.username == username).first()
+    db = SessionLocal()
+    user = db.query(Users).filter(Users.username == username).first()
     print(user.username)
     if user:
         return UserInDB(**jsonable_encoder(user))
-    # if username in db:
-    #     user_dict = db[username]
-    #     return UserInDB(**user_dict)
 
 
-def authenticate_user(fake_db, username: str, password: str):
-    user = get_user(fake_db, username)
+def authenticate_user(db, username: str, password: str):
+    user = get_user(db, username)
     if not user:
         return False
     if not verify_password(password, user.hashed_password):
@@ -147,7 +130,8 @@ async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
         token_data = TokenData(username=username)
     except InvalidTokenError:
         raise credentials_exception
-    user = get_user(fake_users_db, username=token_data.username)
+    db = SessionLocal()
+    user = get_user(db, username=token_data.username)
     if user is None:
         raise credentials_exception
     return user
@@ -173,7 +157,8 @@ async def get_admin_user(
 async def login_for_access_token(
         form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
 ) -> Token:
-    user = authenticate_user(fake_users_db, form_data.username, form_data.password)
+    db = SessionLocal()
+    user = authenticate_user(db, form_data.username, form_data.password)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -187,49 +172,45 @@ async def login_for_access_token(
     return Token(access_token=access_token, token_type="bearer")
 
 
-@app.get("/users/me")
-async def read_users_me(
-        current_user: Annotated[User, Depends(get_current_active_user)],
-):
-    return current_user
-
-
-@app.post("/items/", dependencies=[Depends(get_current_active_user),Depends(get_admin_user)])
-async def create_item(name: str, description: str):
+@app.post("/products", dependencies=[Depends(get_current_active_user), Depends(get_admin_user)])
+async def create_item(name: str, description: str, response: Response):
     db = SessionLocal()
     db_item = Item(name=name, description=description)
     item_name = db.query(Item).filter(Item.name == name).first()
     if item_name:
-        return {"message": "Item name should be unique"}
+        raise HTTPException(status_code=422, detail="Item name should be unique")
     else:
         db.add(db_item)
         db.commit()
         db.refresh(db_item)
-        return db_item
+        response.status_code= status.HTTP_201_CREATED
+        return response
 
 
 # Read (GET)
-@app.get("/items/{item_id}", dependencies=[Depends(get_current_active_user)])
-async def read_item(item_id: int):
+@app.get("/products/{product_id}", dependencies=[Depends(get_current_active_user)])
+async def read_item(product_id: int):
     db = SessionLocal()
-    item = db.query(Item).filter(Item.id == item_id).first()
+    item = db.query(Item).filter(Item.id == product_id).first()
     if item:
         return item
     else:
-        return {"message": "Item not found"}
+        raise HTTPException(status_code=404, detail="Product not found")
 
 
-@app.get("/items", dependencies=[Depends(get_current_active_user)])
+@app.get("/products", dependencies=[Depends(get_current_active_user)])
 async def read_item():
     db = SessionLocal()
     item = db.query(Item).offset(0).limit(100).all()
     if item:
         return item
     else:
-        return {"message": "No items found"}
+        # return {"message": "No items found"}
+        raise HTTPException(status_code=204, detail="No Products available")
+
 
 # Update (PUT)
-@app.put("/items/{item_id}")
+@app.put("/products/{product_id}", dependencies=[Depends(get_current_active_user), Depends(get_admin_user)])
 async def update_item(item_id: int, name: str, description: str):
     db = SessionLocal()
     db_item = db.query(Item).filter(Item.id == item_id).first()
@@ -240,21 +221,23 @@ async def update_item(item_id: int, name: str, description: str):
 
 
 # Delete (DELETE)
-@app.delete("/items/{item_id}")
+@app.delete("/products/{product_id}", dependencies=[Depends(get_current_active_user), Depends(get_admin_user)])
 async def delete_item(item_id: int):
     db = SessionLocal()
     db_item = db.query(Item).filter(Item.id == item_id).first()
     db.delete(db_item)
     db.commit()
-    return {"message": "Item deleted successfully"}
+    return {"message": "Product deleted successfully"}
+
+
 #
 #
-@app.post("/signup/")
-async def create_user(username: str, fullname:str, email: str, password: str):
+@app.post("/createUser/", dependencies=[Depends(get_current_active_user), Depends(get_admin_user)])
+async def create_user(username: str, fullname: str, email: str, password: str):
     db = SessionLocal()
     hashed_password = get_password_hash(password)
-    db_user = Users(username=username,fullname=fullname, email=email, hashed_password=hashed_password,
-                    disabled=False, admin=True)
+    db_user = Users(username=username, fullname=fullname, email=email, hashed_password=hashed_password,
+                    disabled=False, admin=False)
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
