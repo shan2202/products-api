@@ -1,0 +1,7 @@
+fastapi[standard]
+pydantic
+fastapi.security
+passlib[bcrypt]
+datetime
+sqlalchemy
+pyjwt
